@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live Stream Scene Manager</title>
+<style>
+  :root {
+    --bg: #dfe3e7; --panel: #f5f6f7; --ink: #1c2833; --muted: #55646f;
+    --line: #aeb8c1; --live: #d9302a; --focus: #1f5f8b;
+    --font: "Segoe UI", "Helvetica Neue", Arial, system-ui, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #1e262e; --panel: #2a343e; --ink: #e8edf1; --muted: #9aa8b4;
+      --line: #4a5864; --live: #ff5a52; --focus: #6fb3e0;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--font); }
+  body { padding: 24px 16px 48px; }
+  main { max-width: 1100px; margin: 0 auto; display: grid; gap: 20px; }
+  h1 { margin: 0; font-size: 1.6rem; letter-spacing: -0.01em; }
+  header p { margin: 4px 0 0; color: var(--muted); }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 18px; }
+  h2 { margin: 0 0 12px; font-size: 1rem; font-weight: 600; }
+
+  /* Program monitor: the scene that is on air right now */
+  .monitor { display: grid; grid-template-columns: minmax(200px, 320px) 1fr; gap: 20px; align-items: stretch; }
+  .screen {
+    min-height: 150px; border-radius: 4px; display: flex; align-items: flex-end; padding: 12px;
+    color: #fff; font-size: 1.3rem; font-weight: 600; background: #555;
+    border: 3px solid var(--live); text-shadow: 0 1px 3px rgba(0,0,0,.45);
+  }
+  .screen.empty { background: transparent; border: 3px dashed var(--line); color: var(--muted); text-shadow: none; font-weight: 400; font-size: 1rem; }
+  .tally { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; color: var(--live); }
+  .tally i { width: 12px; height: 12px; border-radius: 50%; background: var(--live); animation: pulse 1.8s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .35; } }
+  .neighbors { margin: 10px 0 0; display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; color: var(--muted); }
+  .neighbors dt { font-weight: 600; } .neighbors dd { margin: 0; color: var(--ink); }
+
+  /* Horizontal linked list */
+  .track-wrap { overflow-x: auto; padding: 8px 4px 14px; }
+  .track { list-style: none; margin: 0; padding: 0; display: flex; align-items: center; width: max-content; min-width: 100%; }
+  .link { width: 44px; text-align: center; color: var(--muted); font-size: 1.3rem; user-select: none; flex: none; }
+  .terminal { flex: none; color: var(--muted); font-size: .85rem; text-align: center; width: 52px; }
+  .scene { flex: none; width: 150px; background: var(--bg); border: 2px solid var(--line); border-radius: 4px; overflow: hidden; }
+  .scene.live { border-color: var(--live); box-shadow: 0 0 0 3px color-mix(in srgb, var(--live) 30%, transparent); }
+  .thumb { height: 64px; }
+  .meta { padding: 8px 10px 10px; }
+  .meta strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .meta small { color: var(--muted); }
+  .badge { display: inline-block; margin-top: 6px; padding: 2px 8px; border-radius: 3px; background: var(--live); color: #fff; font-size: .8rem; font-weight: 600; }
+  .badge.hidden { visibility: hidden; }
+
+  /* Controls */
+  .controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; }
+  button, input, select { font: inherit; color: var(--ink); }
+  button { padding: 10px 16px; border-radius: 4px; border: 1px solid var(--ink); background: var(--panel); cursor: pointer; }
+  button:hover:not(:disabled) { background: var(--ink); color: var(--panel); }
+  button.danger { border-color: var(--live); color: var(--live); }
+  button.danger:hover:not(:disabled) { background: var(--live); color: #fff; }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  :is(button, input, select):focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+  form { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; }
+  label { display: grid; gap: 4px; color: var(--muted); font-size: .9rem; }
+  input, select { padding: 9px 10px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); min-width: 200px; }
+  #status { min-height: 1.4em; margin: 0; color: var(--muted); }
+  #status.error { color: var(--live); font-weight: 600; }
+  @media (max-width: 700px) { .monitor { grid-template-columns: 1fr; } }
+  @media (prefers-reduced-motion: reduce) { .tally i { animation: none; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Live Stream Scene Manager</h1>
+    <p>Scenes are stored in a doubly linked list. Switch forward and backward in constant time.</p>
+    <p id="connection-status" role="status" aria-live="polite">Checking OBS connection...</p>
+  </header>
+
+  <section class="panel monitor" aria-label="Program monitor">
+    <div id="screen" class="screen empty">No scene is live</div>
+    <div>
+      <div class="tally"><i aria-hidden="true"></i> Currently Live</div>
+      <dl class="neighbors">
+        <dt>Previous</dt><dd id="prev-name">None</dd>
+        <dt>Next</dt><dd id="next-name">None</dd>
+        <dt>Total scenes</dt><dd id="size">0</dd>
+      </dl>
+    </div>
+  </section>
+
+  <section class="panel" aria-label="Scene list">
+    <h2>Scene list</h2>
+    <div class="track-wrap"><ul id="track" class="track"></ul></div>
+  </section>
+
+  <section class="panel" aria-label="Controls">
+    <div class="controls">
+      <button id="btn-prev" type="button">Previous Scene</button>
+      <button id="btn-next" type="button">Next Scene</button>
+      <button id="btn-remove" type="button" class="danger">Remove Current Scene</button>
+      <button id="btn-stream-start" type="button" disabled>Start Stream</button>
+      <button id="btn-stream-stop" type="button" class="danger" disabled>Stop Stream</button>
+    </div>
+    <hr style="border:0;border-top:1px solid var(--line);margin:16px 0">
+    <form id="add-form">
+      <label>Scene name
+        <input id="scene-name" type="text" maxlength="30" placeholder="e.g. Chat Overlay" required>
+      </label>
+      <label>Insert position
+        <select id="scene-position">
+          <option value="end">At the end of the list</option>
+          <option value="after_current">After the live scene</option>
+        </select>
+      </label>
+      <button type="submit">Add New Scene</button>
+    </form>
+    <p id="status" role="status" aria-live="polite"></p>
+  </section>
+</main>
+
+<script>
+  const els = {
+    track: document.getElementById("track"),
+    screen: document.getElementById("screen"),
+    prevName: document.getElementById("prev-name"),
+    nextName: document.getElementById("next-name"),
+    size: document.getElementById("size"),
+    status: document.getElementById("status"),
+    connectionStatus: document.getElementById("connection-status"),
+    btnPrev: document.getElementById("btn-prev"),
+    btnNext: document.getElementById("btn-next"),
+    btnRemove: document.getElementById("btn-remove"),
+    btnStreamStart: document.getElementById("btn-stream-start"),
+    btnStreamStop: document.getElementById("btn-stream-stop"),
+    form: document.getElementById("add-form"),
+    nameInput: document.getElementById("scene-name"),
+    position: document.getElementById("scene-position"),
+  };
+
+  // Send a request to the Flask API and return the parsed JSON.
+  async function api(path, method = "GET", body) {
+    const response = await fetch(path, {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "Request failed.");
+    return data;
+  }
+
+  function setStatus(text, isError = false) {
+    els.status.textContent = text || "";
+    els.status.classList.toggle("error", isError);
+  }
+
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+
+  function render(state) {
+    const live = state.scenes.find((s) => s.is_live);
+
+    // Program monitor
+    els.screen.textContent = live ? live.name : "No scene is live";
+    els.screen.classList.toggle("empty", !live);
+    els.screen.style.background = live ? live.color : "";
+    els.prevName.textContent = state.previous_name || "None";
+    els.nextName.textContent = state.next_name || "None";
+    els.size.textContent = state.size;
+    els.position.querySelector('option[value="after_current"]').disabled = state.mode === "obs";
+    if (state.mode === "obs" && els.position.value === "after_current") els.position.value = "end";
+
+    // Horizontal list: head <-> node <-> ... <-> tail
+    els.track.replaceChildren();
+    if (state.scenes.length === 0) {
+      const empty = el("li", "", "The list is empty. Add a scene to get started.");
+      empty.style.color = "var(--muted)";
+      els.track.append(empty);
+    } else {
+      els.track.append(el("li", "terminal", "null"));
+      state.scenes.forEach((scene, index) => {
+        els.track.append(el("li", "link", "\u21C4"));
+        const card = el("li", "scene" + (scene.is_live ? " live" : ""));
+        if (scene.is_live) card.setAttribute("aria-current", "true");
+        const thumb = el("div", "thumb");
+        thumb.style.background = scene.color;
+        const meta = el("div", "meta");
+        const role = index === 0 ? "Head" : index === state.scenes.length - 1 ? "Tail" : "Scene " + (index + 1);
+        const badge = el("span", "badge" + (scene.is_live ? "" : " hidden"), "Currently Live");
+        meta.append(el("strong", "", scene.name), el("small", "", role), el("br"), badge);
+        card.append(thumb, meta);
+        els.track.append(card);
+        if (scene.is_live) requestAnimationFrame(() => card.scrollIntoView({ block: "nearest", inline: "center", behavior: "smooth" }));
+      });
+      els.track.append(el("li", "link", "\u21C4"), el("li", "terminal", "null"));
+    }
+
+    // Button states
+    els.btnPrev.disabled = !state.has_previous;
+    els.btnNext.disabled = !state.has_next;
+    els.btnRemove.disabled = state.size === 0;
+  }
+
+  // Run an API action, then re-render without reloading the page.
+  async function run(path, method, body) {
+    try {
+      const state = await api(path, method, body);
+      render(state);
+      setStatus(state.message);
+      return true;
+    } catch (error) {
+      setStatus(error.message, true);
+      return false;
+    }
+  }
+
+  els.btnNext.addEventListener("click", () => run("/api/scenes/next", "POST"));
+  els.btnPrev.addEventListener("click", () => run("/api/scenes/previous", "POST"));
+  els.btnRemove.addEventListener("click", () => run("/api/scenes/current", "DELETE"));
+
+  async function refreshObsStatus() {
+    try {
+      const state = await api("/api/obs/status");
+      if (state.mode === "obs") {
+        const streamLabel = state.streaming ? "transmisión activa" : "sin transmitir";
+        els.connectionStatus.textContent = `OBS conectado (${state.obs_version}); ${streamLabel}.`;
+        els.btnStreamStart.disabled = state.streaming;
+        els.btnStreamStop.disabled = !state.streaming;
+      } else {
+        els.connectionStatus.textContent = "Modo de demostración. Configura OBS_HOST para conectar OBS.";
+        els.btnStreamStart.disabled = true;
+        els.btnStreamStop.disabled = true;
+      }
+    } catch (error) {
+      els.connectionStatus.textContent = error.message;
+      els.btnStreamStart.disabled = true;
+      els.btnStreamStop.disabled = true;
+    }
+  }
+
+  async function runStream(path) {
+    try {
+      const state = await api(path, "POST");
+      setStatus(state.message);
+      await refreshObsStatus();
+    } catch (error) {
+      setStatus(error.message, true);
+    }
+  }
+
+  els.btnStreamStart.addEventListener("click", () => runStream("/api/stream/start"));
+  els.btnStreamStop.addEventListener("click", () => runStream("/api/stream/stop"));
+
+  els.form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const ok = await run("/api/scenes", "POST", {
+      name: els.nameInput.value,
+      position: els.position.value,
+    });
+    if (ok) { els.nameInput.value = ""; els.nameInput.focus(); }
+  });
+
+  // Arrow keys switch scenes when no form field has focus.
+  document.addEventListener("keydown", (event) => {
+    if (["INPUT", "SELECT", "TEXTAREA"].includes(document.activeElement.tagName)) return;
+    if (event.key === "ArrowRight" && !els.btnNext.disabled) els.btnNext.click();
+    if (event.key === "ArrowLeft" && !els.btnPrev.disabled) els.btnPrev.click();
+  });
+
+  api("/api/scenes").then(render).catch((error) => setStatus(error.message, true));
+  refreshObsStatus();
+</script>
+</body>
+</html>
